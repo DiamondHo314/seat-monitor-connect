@@ -1,8 +1,33 @@
 const readline = require('readline');
 const notifier = require('node-notifier');
 
+
+//this only runs for 30 mins only due to token expiry
+//idk how to make it run longer
 let accessToken = '';
 let refreshToken = '';
+let monitoredSectionId = null;
+
+function parseCliArgs() {
+    const args = process.argv.slice(2);
+    const out = {};
+    for (let i = 0; i < args.length; i++) {
+        const a = args[i];
+        if (!a) continue;
+        if (a.startsWith('--')) {
+            const key = a.slice(2);
+            const val = args[i + 1];
+            out[key] = val;
+            i++;
+        }
+    }
+    return out;
+}
+
+const cli = parseCliArgs();
+if (cli.accessToken) accessToken = cli.accessToken;
+if (cli.refreshToken) refreshToken = cli.refreshToken;
+if (cli.sectionId) monitoredSectionId = cli.sectionId;
 
 async function refreshAccessToken(refreshToken) {
     const refreshUrl = 'https://sso.bracu.ac.bd/realms/bracu/protocol/openid-connect/token';
@@ -45,11 +70,11 @@ async function refreshAccessToken(refreshToken) {
 }
 
 async function checkSeats(accessToken, refreshToken) {
-    //i got the url below from the network tab in devtools while checking section details
-    //from self registration page
-    //note that the section id is hardcoded here, you can change it to any section you want to monitor
-    //here 180322 is the section id for CSE423 section 3
-    const seatStatusUrl = 'https://connect.bracu.ac.bd/api/adv/v1/advising/sections/180322/details';
+    // build URL for the monitored section id; fall back to a placeholder if none provided
+    // 183945 is the section id for cse437 in spring 2026
+
+    const sectionToUse = monitoredSectionId || '183945';
+    const seatStatusUrl = `https://connect.bracu.ac.bd/api/adv/v1/advising/sections/${sectionToUse}/details`;
     try {
         const res = await fetch(seatStatusUrl, {
             "credentials": "include",
@@ -78,48 +103,56 @@ async function checkSeats(accessToken, refreshToken) {
         const consumed = data.section.consumedSeat;
         const remaining = capacity - consumed;
 
-        //console.log("details:", data);
+                // include section number (sectionNum) along with course code and title
+                const sectionNum = data.section.sectionName || data.section.sectionNo || '';
+                const course = `${data.section.courseCode} SEC${sectionNum} - ${data.section.name}`;
+                console.log(`[${new Date().toLocaleTimeString()}] ${course}: ${remaining} seat(s) remaining`);
 
-        const course = `${data.section.courseCode} - ${data.section.name}`;
-        console.log(`[${new Date().toLocaleTimeString()}] ${course}: ${remaining} seat(s) remaining`);
-
-        if (remaining > 0) {
-          console.log('Seat available! Go register now!');
-          notifier.notify({
-              title: 'Seat Available',
-              message: `Seats available in ${course}: ${remaining}`,
-              sound: true
-          });
-        }
+                if (remaining > 0) {
+                    console.log('Seat available! Go register now!');
+                    notifier.notify({
+                            title: 'Seat Available',
+                            message: `Seats available in ${course}: ${remaining}`,
+                            sound: true
+                    });
+                }
     } catch (err) {
       console.error('Error checking seats:', err.message);
     }
 }
 
-if(require.main === module) {
+if (require.main === module) {
     console.log('Seat monitor started');
-    console.log("enter your initial access token:");
-    const rl = readline.createInterface({
-                    input: process.stdin,
-                    output: process.stdout
-                });
-    rl.question('initial access token: ', (token) => {
-        accessToken = token;
-        rl.question('initial refresh token: ', (rToken) => {
-            refreshToken = rToken;
-            rl.close();
-        
-        //initial check
+    // if CLI args were provided, start non-interactive monitoring
+    if (accessToken && refreshToken && monitoredSectionId) {
+        console.log(`Monitoring section ${monitoredSectionId}`);
+        // initial check
         checkSeats(accessToken, refreshToken);
-        setInterval(() => {
-            checkSeats(accessToken, refreshToken);
-        }, 15000); //checks every 15 seconds
+        setInterval(() => checkSeats(accessToken, refreshToken), 15000);
+        setInterval(() => refreshAccessToken(refreshToken), 240000);
+    } else {
+        console.log("enter your initial access token:");
+        const rl = readline.createInterface({
+                        input: process.stdin,
+                        output: process.stdout
+                    });
+        rl.question('initial access token: ', (token) => {
+            accessToken = token;
+            rl.question('initial refresh token: ', (rToken) => {
+                refreshToken = rToken;
+                rl.close();
+
+                //initial check
+                checkSeats(accessToken, refreshToken);
+                setInterval(() => {
+                    checkSeats(accessToken, refreshToken);
+                }, 15000); //checks every 15 seconds
+            });
+            setInterval(() => {
+                refreshAccessToken(refreshToken);
+            }, 240000); //refreshes every 4 minutes
         });
-        setInterval(() => {
-            refreshAccessToken(refreshToken);
-        }, 240000); //refreshes every 4 minutes
-    
-    });
+    }
 }
 
 module.exports = { refreshAccessToken };
